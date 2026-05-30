@@ -204,39 +204,6 @@ async function poll() {
 		lastGameName = gameName;
 	}
 
-	if (appId) {
-		try {
-			const rpData = await new Promise((resolve, reject) => {
-				client.requestRichPresence(
-					parseInt(appId),
-					[config.targetSteamID],
-					(err, result) => {
-						if (err) return reject(err);
-						resolve(result);
-					}
-				);
-			});
-
-			const userData = rpData?.users?.[config.targetSteamID];
-			const localizedString = userData?.localizedString ?? null;
-			const rawRP = userData?.richPresence ?? {};
-
-			if (localizedString && localizedString !== lastLocalizedString) {
-				console.log(`[${timestamp()}] 🟢 Rich Presence: ${gameName} — ${localizedString}`);
-				lastLocalizedString = localizedString;
-				mqttPublish("steam/game/rich_presence", localizedString);
-			} else if (!localizedString && Object.keys(rawRP).length > 0) {
-				const rawStr = JSON.stringify(rawRP);
-				if (rawStr !== lastLocalizedString) {
-					console.log(`[${timestamp()}] 🟡 Rich Presence (raw, no localization): `, rawRP);
-					lastLocalizedString = rawStr;
-					mqttPublish("steam/game/rich_presence", rawStr);
-				}
-			}
-		} catch {
-			// Not all games support rich presence — expected
-		}
-	}
 }
 
 // ── Steam login ───────────────────────────────────
@@ -272,6 +239,21 @@ client.on("loggedOn", () => {
 
 	poll();
 	pollTimer = setInterval(poll, config.pollIntervalMs);
+});
+
+client.on("user", (sid, persona) => {
+	if (sid.getSteamID64() !== config.targetSteamID) return;
+
+	const rpString = persona.rich_presence_string || null;
+	const rawRP = persona.rich_presence ?? {};
+	const validLocalized = rpString && rpString !== "Unknown" ? rpString : null;
+	const displayStr = validLocalized ?? rawRP.status ?? (Object.keys(rawRP).length > 0 ? JSON.stringify(rawRP) : null);
+
+	if (displayStr && displayStr !== lastLocalizedString) {
+		console.log(`[${timestamp()}] 🟢 Rich Presence: ${lastGameName} — ${displayStr}`);
+		lastLocalizedString = displayStr;
+		mqttPublish("steam/game/rich_presence", displayStr);
+	}
 });
 
 client.on("error", (err) => {
