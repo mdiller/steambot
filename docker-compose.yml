@@ -1,0 +1,8 @@
+services:
+  steambot:
+    build: .
+    container_name: steambot
+    restart: unless-stopped
+    volumes:
+      - ./config.json:/app/config.json:ro
+      - ./data:/app/data
