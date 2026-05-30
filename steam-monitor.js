@@ -203,7 +203,6 @@ async function poll() {
 		}
 		lastGameName = gameName;
 	}
-
 }
 
 // ── Steam login ───────────────────────────────────
@@ -232,6 +231,7 @@ client.on("loggedOn", () => {
 	console.log(`[${timestamp()}] ✅ Bot logged in as ${config.botUsername}`);
 	console.log(`[${timestamp()}] 👀 Monitoring SteamID: ${config.targetSteamID}`);
 	console.log(`[${timestamp()}] 🔄 Polling every ${config.pollIntervalMs / 1000}s`);
+	console.log(`[${timestamp()}] 📻 Subscribed to rich presence updates`);
 
 	client.setPersona(SteamUser.EPersonaState.Online);
 
