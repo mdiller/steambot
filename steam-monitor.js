@@ -41,7 +41,7 @@ const DISCOVERIES = [
 			availability_topic: "steam/availability",
 			icon: "mdi:steam",
 			device_class: "enum",
-			options: ["Online", "Offline", "Away", "Busy", "Snooze", "Looking to Trade", "Looking to Play"],
+			options: ["Online", "Offline", "Away", "Busy", "Snooze", "Looking to Trade", "Looking to Play", "Error"],
 			device: DEVICE,
 		},
 	},
@@ -142,6 +142,9 @@ let lastLocalizedString = null;
 let lastGameName = null;
 let lastPersonaState = null;
 let pollTimer = null;
+let reconnectDelay = 5000;
+let reconnectTimer = null;
+let isLoggingIn = false;
 
 // ── Helpers ──────────────────────────────────────
 
@@ -205,6 +208,27 @@ async function poll() {
 	}
 }
 
+function scheduleReconnect() {
+	if (reconnectTimer) return;
+	console.log(`[${timestamp()}] 🔄 Reconnecting in ${reconnectDelay / 1000}s...`);
+	mqttPublish("steam/persona_state", "Error");
+	lastPersonaState = null;
+	lastGameName = null;
+	lastLocalizedString = null;
+	reconnectTimer = setTimeout(() => {
+		reconnectTimer = null;
+		if (isLoggingIn) return;
+		const m = loadMemory();
+		const opts = m.refreshToken
+			? { refreshToken: m.refreshToken }
+			: { accountName: config.botUsername, password: config.botPassword };
+		console.log(`[${timestamp()}] 🔌 Attempting reconnect...`);
+		reconnectDelay = Math.min(reconnectDelay * 2, 5 * 60 * 1000);
+		isLoggingIn = true;
+		client.logOn(opts);
+	}, reconnectDelay);
+}
+
 // ── Steam login ───────────────────────────────────
 
 const memory = loadMemory();
@@ -214,6 +238,7 @@ const logOnOptions = memory.refreshToken
 	? (() => { console.log(`[startup] logging in with saved refreshToken`); return { refreshToken: memory.refreshToken }; })()
 	: (() => { console.log(`[startup] no saved refreshToken — logging in with password`); return { accountName: config.botUsername, password: config.botPassword }; })();
 
+isLoggingIn = true;
 client.logOn(logOnOptions);
 
 client.on("steamGuard", (domain, callback, lastCodeWrong) => {
@@ -228,6 +253,13 @@ client.on("refreshToken", (token) => {
 });
 
 client.on("loggedOn", () => {
+	isLoggingIn = false;
+	reconnectDelay = 5000;
+	if (reconnectTimer) {
+		clearTimeout(reconnectTimer);
+		reconnectTimer = null;
+	}
+
 	console.log(`[${timestamp()}] ✅ Bot logged in as ${config.botUsername}`);
 	console.log(`[${timestamp()}] 👀 Monitoring SteamID: ${config.targetSteamID}`);
 	console.log(`[${timestamp()}] 🔄 Polling every ${config.pollIntervalMs / 1000}s`);
@@ -235,8 +267,9 @@ client.on("loggedOn", () => {
 
 	client.setPersona(SteamUser.EPersonaState.Online);
 
-	connectMqtt();
+	if (!mqttClient?.connected) connectMqtt();
 
+	if (pollTimer) clearInterval(pollTimer);
 	poll();
 	pollTimer = setInterval(poll, config.pollIntervalMs);
 });
@@ -257,19 +290,22 @@ client.on("user", (sid, persona) => {
 });
 
 client.on("error", (err) => {
+	isLoggingIn = false;
 	console.error(`[${timestamp()}] ❌ Steam error:`, err.message, JSON.stringify(err, Object.getOwnPropertyNames(err)));
-	if (pollTimer) clearInterval(pollTimer);
+	if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
 	if (err.eresult === 5 || err.eresult === 65) {
 		const m = loadMemory();
 		delete m.refreshToken;
 		saveMemory(m);
-		console.log(`[${timestamp()}] 🗑️  Cleared stale refreshToken, will re-authenticate next run`);
+		console.log(`[${timestamp()}] 🗑️  Cleared stale refreshToken, will re-authenticate on reconnect`);
 	}
+	scheduleReconnect();
 });
 
 client.on("disconnected", (eresult, msg) => {
 	console.warn(`[${timestamp()}] ⚠️  Disconnected: ${msg}`);
-	if (pollTimer) clearInterval(pollTimer);
+	if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+	scheduleReconnect();
 });
 
 // ── Graceful shutdown ─────────────────────────────

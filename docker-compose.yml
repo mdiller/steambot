@@ -3,6 +3,8 @@ services:
     build: .
     container_name: steambot
     restart: unless-stopped
+    environment:
+      - TZ=America/Los_Angeles
     volumes:
       - ./config.json:/app/config.json:ro
       - ./data:/app/data
