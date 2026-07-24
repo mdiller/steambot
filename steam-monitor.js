@@ -145,6 +145,8 @@ let pollTimer = null;
 let reconnectDelay = 5000;
 let reconnectTimer = null;
 let isLoggingIn = false;
+let loginTimeoutTimer = null;
+let lastHealthyAt = Date.now();
 
 // ── Helpers ──────────────────────────────────────
 
@@ -179,6 +181,7 @@ const PERSONA_STATES = {
 async function poll() {
 	const summary = await getPlayerSummary();
 	if (!summary) return;
+	lastHealthyAt = Date.now();
 
 	const personaState = PERSONA_STATES[summary.personastate] ?? `State ${summary.personastate}`;
 	const gameName = summary.gameextrainfo ?? null;
@@ -210,6 +213,12 @@ async function poll() {
 
 function scheduleReconnect() {
 	if (reconnectTimer) return;
+	// If already waiting for logOn to complete, clear it and retry — the old logOn stalled
+	if (isLoggingIn) {
+		console.warn(`[${timestamp()}] ⚠️  scheduleReconnect called while logOn pending — aborting stale login`);
+		isLoggingIn = false;
+		if (loginTimeoutTimer) { clearTimeout(loginTimeoutTimer); loginTimeoutTimer = null; }
+	}
 	console.log(`[${timestamp()}] 🔄 Reconnecting in ${reconnectDelay / 1000}s...`);
 	mqttPublish("steam/persona_state", "Error");
 	lastPersonaState = null;
@@ -217,7 +226,6 @@ function scheduleReconnect() {
 	lastLocalizedString = null;
 	reconnectTimer = setTimeout(() => {
 		reconnectTimer = null;
-		if (isLoggingIn) return;
 		const m = loadMemory();
 		const opts = m.refreshToken
 			? { refreshToken: m.refreshToken }
@@ -226,6 +234,14 @@ function scheduleReconnect() {
 		reconnectDelay = Math.min(reconnectDelay * 2, 5 * 60 * 1000);
 		isLoggingIn = true;
 		client.logOn(opts);
+		// If logOn never fires loggedOn or error, force a retry after 45s
+		loginTimeoutTimer = setTimeout(() => {
+			loginTimeoutTimer = null;
+			if (!isLoggingIn) return;
+			console.warn(`[${timestamp()}] ⚠️  logOn timed out after 45s with no response — retrying...`);
+			isLoggingIn = false;
+			scheduleReconnect();
+		}, 45000);
 	}, reconnectDelay);
 }
 
@@ -254,6 +270,8 @@ client.on("refreshToken", (token) => {
 
 client.on("loggedOn", () => {
 	isLoggingIn = false;
+	lastHealthyAt = Date.now();
+	if (loginTimeoutTimer) { clearTimeout(loginTimeoutTimer); loginTimeoutTimer = null; }
 	reconnectDelay = 5000;
 	if (reconnectTimer) {
 		clearTimeout(reconnectTimer);
@@ -291,6 +309,7 @@ client.on("user", (sid, persona) => {
 
 client.on("error", (err) => {
 	isLoggingIn = false;
+	if (loginTimeoutTimer) { clearTimeout(loginTimeoutTimer); loginTimeoutTimer = null; }
 	console.error(`[${timestamp()}] ❌ Steam error:`, err.message, JSON.stringify(err, Object.getOwnPropertyNames(err)));
 	if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
 	if (err.eresult === 5 || err.eresult === 65) {
@@ -307,6 +326,18 @@ client.on("disconnected", (eresult, msg) => {
 	if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
 	scheduleReconnect();
 });
+
+// ── Watchdog ──────────────────────────────────────
+// If the process goes more than 15 minutes without a successful poll or login,
+// exit so Docker/PM2 restarts it — guards against stalled logOn() calls and
+// any other stuck states that prevent reconnect from ever succeeding.
+setInterval(() => {
+	const stuckMs = Date.now() - lastHealthyAt;
+	if (stuckMs > 15 * 60 * 1000) {
+		console.error(`[${timestamp()}] 💀 Watchdog: no healthy state in ${Math.round(stuckMs / 60000)}m — restarting process`);
+		process.exit(1);
+	}
+}, 60 * 1000);
 
 // ── Graceful shutdown ─────────────────────────────
 
